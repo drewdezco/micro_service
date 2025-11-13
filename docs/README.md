@@ -46,59 +46,6 @@ Install them:
 ```bash
 pip install fastapi uvicorn scikit-learn pydantic joblib
 ```
-Absolutely! Here’s your **GitHub-ready Markdown version**, fully formatted with headings, code blocks, and clear structure 👇
-
----
-
-````markdown
-# 🧠 Toxicity Classifier API — Beginner-Friendly Walkthrough
-
-Think of this as a small website (an API) you can talk to with code.  
-You send it a sentence, and it tells you if the sentence is toxic or not — how sure it is, what words made it think that, and it can even hide (redact) those words.
-
-This project is structured as a mini-build you can complete over **1–2 weeks**.
-
----
-
-## 🚀 What You’re Building
-
-- A simple program on your computer that listens for requests.
-- When you send it text like `"You are an idiot!"`, it replies with:
-  - **Label:** `toxic` or `non_toxic`
-  - **Confidence score:** how sure it is (e.g., `0.94 = 94%`)
-  - **Rationale:** the part of the text that made it think it’s toxic (e.g., `"idiot"`)
-  - **Optional redacted version:** `"You are an [REDACTED]!"`
-
-### 💡 Why This Is Cool for Your Portfolio
-
-- Mixes **data science** (training a model) with **software engineering** (serving it as a web API).
-- You’ll learn about **APIs**, **machine learning**, and **clean project structure**.
-
----
-
-## 🗺️ The Plan at a Glance
-
-1. Learn the tools: Python, FastAPI (for the web part), scikit-learn (for the model).  
-2. Get a tiny dataset or use a pre-trained simple model.  
-3. Build the API with one endpoint: `/predict`.  
-4. Add “rationale” (which words mattered) and redaction.  
-5. Make it reliable: health check, simple tests, and a README.
-
----
-
-## 🧰 Step 1: Tools You’ll Use
-
-- **Python:** main language  
-- **FastAPI:** for building the web API  
-- **scikit-learn:** for training a simple classifier  
-- **Joblib:** for saving/loading the model  
-- **Requests / cURL / Postman:** for testing the API  
-
-Install them:
-
-```bash
-pip install fastapi uvicorn scikit-learn pydantic joblib
-````
 
 Run the server later with:
 
