@@ -2,6 +2,7 @@ from fastapi import FastAPI, Query
 from pydantic import BaseModel, Field
 import joblib
 import time
+import os
 
 app = FastAPI(title="Toxicity Classifier API")
 
