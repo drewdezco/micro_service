@@ -5,7 +5,14 @@ import time
 
 app = FastAPI(title="Toxicity Classifier API")
 
-MODEL = joblib.load("models/toxicity_model.joblib")
+# get the directory of this file
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# get the path to the model
+MODEL_PATH = os.path.join(BASE_DIR, "models", "toxicity_model.joblib")
+
+# load the model
+MODEL = joblib.load(MODEL_PATH)
 
 class PredictRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
