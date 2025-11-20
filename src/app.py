@@ -1,11 +1,25 @@
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import joblib
 import time
 import os
 
 app = FastAPI(title="Toxicity Classifier API")
+
+# Add CORS middleware to allow frontend to make requests
+# Must be added before routes are defined
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://0.0.0.0:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # get the directory of this file
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,16 +54,150 @@ def simple_scores(text: str):
 def choose_label(scores: dict, threshold: float):
     return "toxic" if scores["toxic"] >= threshold else "non_toxic"
 
-def find_rationale_spans(text: str, top_k: int = 1):
-    toxic_terms = ["idiot", "stupid", "loser", "shut up", "hate", "worthless"]
+def find_rationale_spans(text: str, top_k: int = 5):
+    """
+    Find toxic terms in text by using the model's feature importance.
+    Returns spans of words that contribute most to toxic classification.
+    """
+    import re
+    
+    try:
+        # Get the vectorizer and classifier from the pipeline
+        vectorizer = MODEL.named_steps['tfidf']
+        classifier = MODEL.named_steps['clf']
+        
+        # Transform the text to get feature names
+        X = vectorizer.transform([text])
+        feature_names = vectorizer.get_feature_names_out()
+        
+        # Get coefficients for toxic class (class 1)
+        if hasattr(classifier, 'coef_'):
+            coef = classifier.coef_[0]  # Get coefficients for toxic class
+        else:
+            return _fallback_rationale(text, top_k)
+        
+        # Common stop words and non-toxic words to filter out
+        stop_words = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'be',
+            'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+            'would', 'could', 'should', 'may', 'might', 'must', 'can', 'this',
+            'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
+            'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'her', 'its',
+            'our', 'their', 'think', 'think', 'great', 'guy', 'sometimes', 'absolute'
+        }
+        
+        # Get feature indices and their importance scores
+        feature_scores = []
+        for i in range(X.shape[1]):
+            if X[0, i] > 0:  # Only consider features present in the text
+                score = coef[i] * X[0, i]
+                # Only include features with positive contribution to toxicity
+                # and filter out common stop words
+                term = feature_names[i]
+                if score > 0.1 and term.lower() not in stop_words:  # Minimum threshold
+                    feature_scores.append((i, score, term))
+        
+        # Sort by importance (highest scores first)
+        feature_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Get top features
+        top_features = feature_scores[:top_k]
+        
+        # Tokenize text to find word boundaries
+        words = re.findall(r'\b\w+\b', text)
+        word_positions = []
+        current_pos = 0
+        for word in words:
+            pos = text.find(word, current_pos)
+            if pos >= 0:
+                word_positions.append((word.lower(), pos, pos + len(word)))
+                current_pos = pos + len(word)
+        
+        # Find these terms in the original text using word boundaries
+        spans = []
+        lower_text = text.lower()
+        
+        for feat_idx, score, term in top_features:
+            # Try to find as a complete word (not substring)
+            term_lower = term.lower()
+            
+            # Check if it's a single word or n-gram
+            if ' ' in term:
+                # For n-grams, find the phrase
+                i = lower_text.find(term_lower)
+                if i >= 0:
+                    actual_span = text[i:i+len(term)]
+                    spans.append(RationaleSpan(
+                        span=actual_span,
+                        start=i,
+                        end=i+len(term),
+                        weight=float(score)
+                    ))
+            else:
+                # For single words, find using word boundaries
+                for word_lower, start, end in word_positions:
+                    if word_lower == term_lower:
+                        actual_span = text[start:end]
+                        spans.append(RationaleSpan(
+                            span=actual_span,
+                            start=start,
+                            end=end,
+                            weight=float(score)
+                        ))
+                        break  # Only add once
+        
+        # Remove duplicates and sort by position
+        seen = set()
+        unique_spans = []
+        for span in spans:
+            key = (span.start, span.end)
+            if key not in seen:
+                seen.add(key)
+                unique_spans.append(span)
+        
+        return unique_spans[:top_k] if unique_spans else None
+        
+    except Exception as e:
+        # Fallback to simple keyword matching if model introspection fails
+        return _fallback_rationale(text, top_k)
+
+def _fallback_rationale(text: str, top_k: int = 5):
+    """Fallback method using common toxic terms with word boundary matching."""
+    import re
+    
+    toxic_terms = [
+        "idiot", "stupid", "loser", "hate", "worthless", "dick", "fuck", 
+        "asshole", "bastard", "bitch", "damn", "hell", "crap", "shit",
+        "dickhead", "moron", "retard", "fool", "jerk", "scum", "ass",
+        "fucking", "damned", "hated", "stupid", "idiotic"
+    ]
+    
     lower = text.lower()
     spans = []
+    
+    # Use word boundaries to match whole words only
     for term in toxic_terms:
-        i = lower.find(term)
-        if i >= 0:
-            spans.append(RationaleSpan(span=text[i:i+len(term)], start=i, end=i+len(term), weight=1.0))
+        # Create a regex pattern with word boundaries
+        pattern = r'\b' + re.escape(term.lower()) + r'\b'
+        matches = list(re.finditer(pattern, lower))
+        
+        for match in matches:
+            start = match.start()
+            end = match.end()
+            actual_span = text[start:end]
+            spans.append(RationaleSpan(
+                span=actual_span,
+                start=start,
+                end=end,
+                weight=1.0
+            ))
             if len(spans) >= top_k:
                 break
+        
+        if len(spans) >= top_k:
+            break
+    
     return spans if spans else None
 
 def redact(text: str, spans: list[RationaleSpan] | None, mode: str = "token") -> str | None:
@@ -61,413 +209,6 @@ def redact(text: str, spans: list[RationaleSpan] | None, mode: str = "token") ->
         replacement = "[REDACTED]" if mode == "token" else "".join("*" if c.isalnum() else c for c in segment)
         chars[s.start:s.end] = list(replacement)
     return "".join(chars)
-
-@app.get("/", response_class=HTMLResponse)
-def ui():
-    """Serve the user interface for the toxicity classifier."""
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Toxicity Classifier</title>
-        <style>
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-                background: #1a1a1a;
-                color: #d4d4d4;
-                min-height: 100vh;
-                padding: 20px;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-            }
-            .container {
-                background: #2b2b2b;
-                border-radius: 8px;
-                border: 1px solid #3b3b3b;
-                max-width: 800px;
-                width: 100%;
-                padding: 40px;
-            }
-            h1 {
-                color: #ffffff;
-                margin-bottom: 10px;
-                font-size: 2em;
-                font-weight: 600;
-            }
-            .subtitle {
-                color: #9ca3af;
-                margin-bottom: 30px;
-                font-size: 0.95em;
-            }
-            .form-group {
-                margin-bottom: 20px;
-            }
-            label {
-                display: block;
-                margin-bottom: 8px;
-                color: #d4d4d4;
-                font-weight: 500;
-                font-size: 0.95em;
-            }
-            textarea {
-                width: 100%;
-                padding: 12px;
-                background: #1a1a1a;
-                border: 1px solid #3b3b3b;
-                border-radius: 4px;
-                font-size: 1em;
-                font-family: inherit;
-                color: #d4d4d4;
-                resize: vertical;
-                min-height: 120px;
-                transition: border-color 0.3s;
-            }
-            textarea:focus {
-                outline: none;
-                border-color: #00d4aa;
-            }
-            textarea::placeholder {
-                color: #6b7280;
-            }
-            .options {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 15px;
-                margin-bottom: 20px;
-            }
-            .option-group {
-                display: flex;
-                flex-direction: column;
-            }
-            input[type="number"] {
-                padding: 10px;
-                background: #1a1a1a;
-                border: 1px solid #3b3b3b;
-                border-radius: 4px;
-                font-size: 0.95em;
-                color: #d4d4d4;
-                transition: border-color 0.3s;
-            }
-            input[type="number"]:focus {
-                outline: none;
-                border-color: #00d4aa;
-            }
-            .checkbox-group {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-            }
-            input[type="checkbox"] {
-                width: 18px;
-                height: 18px;
-                cursor: pointer;
-                accent-color: #00d4aa;
-            }
-            button {
-                background: #00d4aa;
-                color: #1a1a1a;
-                border: none;
-                padding: 14px 28px;
-                border-radius: 4px;
-                font-size: 1em;
-                font-weight: 600;
-                cursor: pointer;
-                width: 100%;
-                transition: background-color 0.2s, transform 0.2s;
-            }
-            button:hover {
-                background: #00b894;
-                transform: translateY(-1px);
-            }
-            button:active {
-                transform: translateY(0);
-            }
-            button:disabled {
-                opacity: 0.6;
-                cursor: not-allowed;
-                transform: none;
-            }
-            #results {
-                margin-top: 30px;
-                padding: 20px;
-                background: #1a1a1a;
-                border-radius: 4px;
-                border: 1px solid #3b3b3b;
-                display: none;
-            }
-            .result-label {
-                font-size: 1.3em;
-                font-weight: 600;
-                margin-bottom: 15px;
-                padding: 12px;
-                border-radius: 4px;
-                text-align: center;
-            }
-            .toxic {
-                background: rgba(239, 68, 68, 0.2);
-                color: #f87171;
-                border: 1px solid rgba(239, 68, 68, 0.3);
-            }
-            .non-toxic {
-                background: rgba(34, 197, 94, 0.2);
-                color: #4ade80;
-                border: 1px solid rgba(34, 197, 94, 0.3);
-            }
-            .result-section {
-                margin-bottom: 20px;
-            }
-            .result-section h3 {
-                color: #ffffff;
-                margin-bottom: 10px;
-                font-size: 1.1em;
-                font-weight: 600;
-            }
-            .scores {
-                display: flex;
-                gap: 15px;
-                flex-wrap: wrap;
-            }
-            .score-item {
-                flex: 1;
-                min-width: 150px;
-                padding: 12px;
-                background: #2b2b2b;
-                border: 1px solid #3b3b3b;
-                border-radius: 4px;
-                text-align: center;
-            }
-            .score-label {
-                font-size: 0.85em;
-                color: #9ca3af;
-                margin-bottom: 5px;
-                text-transform: uppercase;
-            }
-            .score-value {
-                font-size: 1.3em;
-                font-weight: 600;
-                color: #ffffff;
-            }
-            .rationale-list {
-                list-style: none;
-                padding: 0;
-            }
-            .rationale-item {
-                padding: 10px;
-                background: rgba(251, 191, 36, 0.15);
-                border-left: 4px solid #fbbf24;
-                margin-bottom: 8px;
-                border-radius: 4px;
-                color: #fbbf24;
-            }
-            .redacted-text {
-                padding: 12px;
-                background: #1a1a1a;
-                border: 1px solid #3b3b3b;
-                border-radius: 4px;
-                font-family: 'Courier New', monospace;
-                border-left: 4px solid #6b7280;
-                color: #9ca3af;
-            }
-            .meta-info {
-                font-size: 0.9em;
-                color: #9ca3af;
-                padding-top: 15px;
-                border-top: 1px solid #3b3b3b;
-            }
-            .error {
-                background: rgba(239, 68, 68, 0.2);
-                color: #f87171;
-                padding: 15px;
-                border-radius: 4px;
-                border: 1px solid rgba(239, 68, 68, 0.3);
-                margin-top: 20px;
-                display: none;
-            }
-            .loading {
-                text-align: center;
-                padding: 20px;
-                color: #9ca3af;
-                display: none;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🧠 Toxicity Classifier</h1>
-            <p class="subtitle">Enter text below to check if it's toxic or non-toxic</p>
-            
-            <form id="classifyForm">
-                <div class="form-group">
-                    <label for="text">Text to Classify:</label>
-                    <textarea id="text" name="text" placeholder="Enter text here..." required></textarea>
-                </div>
-                
-                <div class="options">
-                    <div class="option-group">
-                        <label for="threshold">Threshold (0.0 - 1.0):</label>
-                        <input type="number" id="threshold" name="threshold" value="0.5" min="0" max="1" step="0.1">
-                    </div>
-                    <div class="option-group">
-                        <div class="checkbox-group">
-                            <input type="checkbox" id="include_rationale" name="include_rationale" checked>
-                            <label for="include_rationale">Include Rationale</label>
-                        </div>
-                    </div>
-                    <div class="option-group">
-                        <div class="checkbox-group">
-                            <input type="checkbox" id="redact_flagged" name="redact_flagged">
-                            <label for="redact_flagged">Redact Flagged Text</label>
-                        </div>
-                    </div>
-                </div>
-                
-                <button type="submit" id="submitBtn">Classify Text</button>
-            </form>
-            
-            <div class="loading" id="loading">Analyzing text...</div>
-            <div class="error" id="error"></div>
-            
-            <div id="results">
-                <div class="result-label" id="resultLabel"></div>
-                
-                <div class="result-section">
-                    <h3>Confidence Scores</h3>
-                    <div class="scores" id="scores"></div>
-                </div>
-                
-                <div class="result-section" id="rationaleSection" style="display: none;">
-                    <h3>Rationale (Flagged Terms)</h3>
-                    <ul class="rationale-list" id="rationaleList"></ul>
-                </div>
-                
-                <div class="result-section" id="redactedSection" style="display: none;">
-                    <h3>Redacted Text</h3>
-                    <div class="redacted-text" id="redactedText"></div>
-                </div>
-                
-                <div class="meta-info" id="metaInfo"></div>
-            </div>
-        </div>
-        
-        <script>
-            const form = document.getElementById('classifyForm');
-            const results = document.getElementById('results');
-            const loading = document.getElementById('loading');
-            const error = document.getElementById('error');
-            const submitBtn = document.getElementById('submitBtn');
-            
-            form.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                
-                // Hide previous results and errors
-                results.style.display = 'none';
-                error.style.display = 'none';
-                loading.style.display = 'block';
-                submitBtn.disabled = true;
-                
-                const text = document.getElementById('text').value;
-                const threshold = parseFloat(document.getElementById('threshold').value);
-                const include_rationale = document.getElementById('include_rationale').checked;
-                const redact_flagged = document.getElementById('redact_flagged').checked;
-                
-                // Build query parameters
-                const params = new URLSearchParams({
-                    include_rationale: include_rationale.toString(),
-                    redact_flagged: redact_flagged.toString(),
-                    threshold: threshold.toString()
-                });
-                
-                try {
-                    const response = await fetch(`/predict?${params.toString()}`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ text: text })
-                    });
-                    
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    
-                    const data = await response.json();
-                    
-                    // Display results
-                    displayResults(data);
-                    
-                } catch (err) {
-                    error.textContent = `Error: ${err.message}`;
-                    error.style.display = 'block';
-                } finally {
-                    loading.style.display = 'none';
-                    submitBtn.disabled = false;
-                }
-            });
-            
-            function displayResults(data) {
-                // Set label
-                const resultLabel = document.getElementById('resultLabel');
-                resultLabel.textContent = `Label: ${data.label.toUpperCase()}`;
-                resultLabel.className = `result-label ${data.label === 'toxic' ? 'toxic' : 'non-toxic'}`;
-                
-                // Display scores
-                const scoresDiv = document.getElementById('scores');
-                scoresDiv.innerHTML = '';
-                for (const [key, value] of Object.entries(data.scores)) {
-                    const scoreItem = document.createElement('div');
-                    scoreItem.className = 'score-item';
-                    scoreItem.innerHTML = `
-                        <div class="score-label">${key.replace('_', ' ').toUpperCase()}</div>
-                        <div class="score-value">${(value * 100).toFixed(1)}%</div>
-                    `;
-                    scoresDiv.appendChild(scoreItem);
-                }
-                
-                // Display rationale
-                const rationaleSection = document.getElementById('rationaleSection');
-                const rationaleList = document.getElementById('rationaleList');
-                if (data.rationale && data.rationale.length > 0) {
-                    rationaleSection.style.display = 'block';
-                    rationaleList.innerHTML = '';
-                    data.rationale.forEach(span => {
-                        const li = document.createElement('li');
-                        li.className = 'rationale-item';
-                        li.textContent = `"${span.span}" (position ${span.start}-${span.end})`;
-                        rationaleList.appendChild(li);
-                    });
-                } else {
-                    rationaleSection.style.display = 'none';
-                }
-                
-                // Display redacted text
-                const redactedSection = document.getElementById('redactedSection');
-                const redactedText = document.getElementById('redactedText');
-                if (data.redacted_text) {
-                    redactedSection.style.display = 'block';
-                    redactedText.textContent = data.redacted_text;
-                } else {
-                    redactedSection.style.display = 'none';
-                }
-                
-                // Display meta info
-                const metaInfo = document.getElementById('metaInfo');
-                metaInfo.textContent = `Confidence: ${(data.confidence * 100).toFixed(1)}% | Latency: ${data.meta.latency_ms}ms | Threshold: ${data.meta.threshold_used}`;
-                
-                results.style.display = 'block';
-            }
-        </script>
-    </body>
-    </html>
-    """
-    return html_content
 
 @app.get("/healthz")
 def health():
